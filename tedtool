@@ -1,0 +1,65 @@
+#!/bin/bash -e
+#
+# TED to rrdtool loader.
+#
+# Make an rrd file like so (salt to taste; order of DS is important, though):
+# $ rrdtool create ted.rrd --start now-2m --step 1 DS:kw:GAUGE:1:0:100 DS:cost:GAUGE:1:0:100 DS:volts:GAUGE:1:0:150 RRA:AVERAGE:0.5:1:86400
+#
+# Graph with something like so:
+# $ rrdtool graph ted.png --end now --start end-1h DEF:kw=ted.rrd:kw:AVERAGE LINE1:kw#0000FF:"kW"
+
+# TODO: Make these parameters.
+BASE_URL="http://your.ted.here"
+LAST_TIMESTAMP="last_timestamp.txt"
+RRD_FILE="ted.rrd"
+
+URL="${BASE_URL}/history/secondhistory.csv"
+CURL="/usr/bin/curl -s"
+RRDTOOL="/usr/bin/rrdtool"
+
+if [[ -e "${LAST_TIMESTAMP}" ]]; then
+  last_timestamp=$(cat "${LAST_TIMESTAMP}")
+else
+  last_timestamp=0
+fi
+
+largest_timestamp=0
+prev_timestamp=999999999999 # Bigger than reasonable epoch seconds.
+datapoints=""
+while read line; do # From ${CURL}; see "done". Must avoid subshell.
+  if [[ ${line} =~ ^[0-9]+, ]]; then
+    line=$(echo -n ${line} | tr -d '\r')
+    raw_timestamp=$(echo "${line}" | cut -f2 -d,)
+    kw=$(echo "${line}" | cut -f3 -d,)
+    cost=$(echo "${line}" | cut -f4 -d,)
+    volts=$(echo "${line}" | cut -f5 -d,)
+
+    # NB: This assumes TED is outputting in the same timezone as this tool.
+    timestamp=$(date -d "${raw_timestamp}" "+%s")
+    if [[ ${timestamp} -le ${last_timestamp} ]]; then
+      # Data comes in reverse chronological order, so just stop reading here.
+      break
+    fi
+    if [[ ${timestamp} -ge ${prev_timestamp} ]]; then
+      # NB: TED does put some data at the end to try to make up for time that
+      # passed during the read, but it is unreliable and doesn't always capture
+      # all the datapoints. Don't depend on it.
+      break
+    fi
+
+    #echo "timestamp: $timestamp kw: $kw cost: $cost volts: $volts"
+    datapoints="${timestamp}:${kw}:${cost}:${volts} ${datapoints}"
+
+    # This is mostly a sanity check; the first one should be the largest.
+    if [[ ${timestamp} -gt ${largest_timestamp} ]]; then
+      largest_timestamp=${timestamp}
+    fi
+    prev_timestamp=${timestamp}
+  fi
+done < <(${CURL} "${URL}")
+
+${RRDTOOL} update ${RRD_FILE} ${datapoints}
+
+if [[ ${largest_timestamp} -ne 0 ]]; then
+  echo ${largest_timestamp} > "${LAST_TIMESTAMP}"
+fi
