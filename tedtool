@@ -12,11 +12,13 @@
 BASE_URL="http://your.ted.here"
 LAST_TIMESTAMP="last_timestamp.txt"
 RRD_FILE="ted.rrd"
+LOG_FILE="ted.log"
 
 URL="${BASE_URL}/history/secondhistory.csv"
 CURL="/usr/bin/curl -s"
 RRDTOOL="/usr/bin/rrdtool"
 
+date >> ${LOG_FILE}
 if [[ -e "${LAST_TIMESTAMP}" ]]; then
   last_timestamp=$(cat "${LAST_TIMESTAMP}")
 else
@@ -26,6 +28,7 @@ fi
 largest_timestamp=0
 prev_timestamp=999999999999 # Bigger than reasonable epoch seconds.
 datapoints=""
+lines_processed=0
 while read line; do # From ${CURL}; see "done". Must avoid subshell.
   if [[ ${line} =~ ^[0-9]+, ]]; then
     line=$(echo -n ${line} | tr -d '\r')
@@ -36,17 +39,25 @@ while read line; do # From ${CURL}; see "done". Must avoid subshell.
 
     # NB: This assumes TED is outputting in the same timezone as this tool.
     timestamp=$(date -d "${raw_timestamp}" "+%s")
+
+    if [[ ${timestamp} -eq ${prev_timestamp} ]]; then
+      echo "Found duplicate timestamp: ${timestamp}" >> ${LOG_FILE}
+      continue
+    fi
     if [[ ${timestamp} -le ${last_timestamp} ]]; then
       # Data comes in reverse chronological order, so just stop reading here.
+      echo "Hit last_timestamp. Exiting loop" >> ${LOG_FILE}
       break
     fi
-    if [[ ${timestamp} -ge ${prev_timestamp} ]]; then
+    if [[ ${timestamp} -gt ${prev_timestamp} ]]; then
       # NB: TED does put some data at the end to try to make up for time that
       # passed during the read, but it is unreliable and doesn't always capture
       # all the datapoints. Don't depend on it.
+      echo "Hit new data at end of file. Exiting loop" >> ${LOG_FILE}
       break
     fi
 
+    lines_processed=$((lines_processed + 1))
     #echo "timestamp: $timestamp kw: $kw cost: $cost volts: $volts"
     datapoints="${timestamp}:${kw}:${cost}:${volts} ${datapoints}"
 
@@ -58,8 +69,12 @@ while read line; do # From ${CURL}; see "done". Must avoid subshell.
   fi
 done < <(${CURL} "${URL}")
 
-${RRDTOOL} update ${RRD_FILE} ${datapoints}
+echo "adding $lines_processed lines to rrd." >> ${LOG_FILE}
+
+${RRDTOOL} update ${RRD_FILE} ${datapoints} >> ${LOG_FILE}
 
 if [[ ${largest_timestamp} -ne 0 ]]; then
   echo ${largest_timestamp} > "${LAST_TIMESTAMP}"
 fi
+
+echo "Run completed successfully" >> ${LOG_FILE}
